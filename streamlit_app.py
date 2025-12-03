@@ -23,55 +23,62 @@ def load_data(crime_file='seoul_crime_data.csv', coord_file='전국 중심 좌�
         df_coord = try_read_csv(coord_file)
 
         # -----------------------------------------------------------
-        # 🚨🚨🚨 범죄 데이터 컬럼 이름 매핑 (최종 수정) 🚨🚨🚨
+        # 🚨 데이터 처리 및 정규화 (오류 방지 핵심 로직)
         # -----------------------------------------------------------
         
-        # 1. Wide Format을 Long Format으로 변환 (컬럼명 확정)
-        # 이미 파일에 '범죄대분류', '범죄중분류' 컬럼이 존재함.
+        # 1. Wide Format을 Long Format으로 변환 (범죄 데이터)
+        # ID 컬럼은 '범죄대분류', '범죄중분류'로 확정
         id_cols = ['범죄대분류', '범죄중분류'] 
         
-        # '횟수' 컬럼명을 아직 모르므로, 횟수 부분은 melt의 value_name으로 처리
-        # melt를 실행하기 위해, id_cols와 겹치지 않는 나머지 컬럼(oo구)들을 value_vars로 간주함.
-
         df_long = pd.melt(df_crime, 
                           id_vars=id_cols,
                           var_name='시군구',      
                           value_name='횟수')       
         
-        # 2. '시군구' 컬럼 정리 (좌표 데이터와 일치시키기 위해)
-        # 만약 구 이름이 '종로구'처럼 좌표 데이터와 정확히 일치하지 않는다면 여기서 수정 필요
-        # 예: df_long['시군구'] = df_long['시군구'].str.replace('서울', '').str.strip() 
-
         df_crime = df_long 
-
-        # 3. 위경도 데이터 전처리 (서울시 구별 평균 좌표 계산)
+        
+        # 2. 위경도 데이터 전처리 (좌표 데이터)
+        # 좌표 파일 컬럼명 확정 및 서울 필터링
         df_coord_seoul = df_coord[df_coord['시도'] == '서울특별시'].copy()
         
+        # 3. 시군구 이름 정규화 (두 데이터의 구 이름 불일치 방지)
+        
+        # 3.1 범죄 데이터 '시군구' 정규화
+        # 예: '서울종로구' -> '종로구', '종로구 ' -> '종로구'
+        df_crime['시군구'] = df_crime['시군구'].str.replace('서울', '').str.strip()
+        
+        # 3.2 좌표 데이터 '시군구' 정규화
+        df_coord_seoul['시군구'] = df_coord_seoul['시군구'].str.strip() 
+
+        # 4. 구별 평균 위경도 계산
         df_gu_coord = df_coord_seoul.groupby('시군구').agg(
             위도=('위도', 'mean'),
             경도=('경도', 'mean')
         ).reset_index()
         
-        # 4. 데이터 병합 (Merge)
+        # 5. 데이터 병합 (Merge)
         df_merged = pd.merge(df_crime, 
                              df_gu_coord, 
                              on='시군구', 
                              how='left')
         
-        # 5. 필수 컬럼 정리
+        # 6. 필수 컬럼 정리
+        required_cols = ['시군구', '위도', '경도', '범죄대분류', '범죄중분류', '횟수']
+        if not all(col in df_merged.columns for col in required_cols):
+             # 이 단계에서 오류가 발생하면, merge가 실패했거나 정규화가 잘못된 것입니다.
+            raise KeyError(f"최종 필수 컬럼 누락: {', '.join([c for c in required_cols if c not in df_merged.columns])}")
+
         df_merged['횟수'] = pd.to_numeric(df_merged['횟수'], errors='coerce').fillna(0)
         df_merged.dropna(subset=['위도', '경도'], inplace=True)
             
         return df_merged
 
     except UnicodeDecodeError as e:
-        st.error(f"🔴 Fatal Error: CSV 파일 인코딩 오류. 파일을 UTF-8로 저장 후 재시도하세요.")
+        st.error(f"🔴 Fatal Error: CSV 파일 인코딩 오류.")
         return pd.DataFrame()
     except KeyError as e:
-        # 이 시점에서 KeyError가 발생하면 대부분 '시군구' 병합 오류 또는 '범죄대분류/중분류' 오류가 아님.
-        # 다른 컬럼(예: '시도', '위도', '경도')이 없거나, melt 과정에서 문제가 발생한 경우임.
         st.error(f"🔴 Critical Error: 데이터 구조 오류 발생! 다음 컬럼을 찾을 수 없습니다: {e}")
-        st.warning("🚨 [해결 방법]: 범죄 데이터 파일의 '범죄대분류' 또는 '범죄중분류' 컬럼 외에, 좌표 파일에 '시도', '시군구' 컬럼이 있는지 확인하세요.")
+        st.warning(f"🚨 [해결 방법]: 범죄 데이터에 '범죄대분류', '범죄중분류' 컬럼이 실제로 있는지, 또는 좌표 데이터에 '시도', '시군구', '위도', '경도' 컬럼이 있는지 확인하세요.")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"🔴 Data Processing Error: 데이터 처리 중 일반 오류 발생: {e}")
@@ -88,7 +95,7 @@ st.title("⚖️ 서울시 범죄 통계 분석 대시보드")
 st.markdown("---")
 
 if df_raw.empty:
-    st.error("데이터 로드에 실패했거나, 병합 후 남아있는 유효한 데이터가 없습니다. 위 오류 메시지를 확인하세요.")
+    st.info("데이터 로드가 완료되지 않아 대시보드가 표시되지 않습니다. 위 오류 메시지를 확인하세요.")
     st.stop()
     
 st.sidebar.header("🔍 분석 설정")
