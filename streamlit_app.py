@@ -2,173 +2,222 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import folium_static
+import altair as alt
 
-# --- 1. 데이터 로드 및 전처리 ---
-# GitHub 저장소에 있는 CSV 파일을 읽기 위한 함수
-# 파일명을 'seoul_crime_data.csv'라고 가정하고, 상대 경로로 접근합니다.
+# --- 1. 데이터 로드 및 전처리 (위경도 통합 로직 수정됨) ---
+# 두 개의 CSV 파일 경로를 지정합니다.
 @st.cache_data
-def load_data(file_path='seoul_crime_data.csv'):
+def load_data(crime_file='seoul_crime_data.csv', coord_file='전국 중심 좌표데이터.csv'):
     try:
-        # 실제 데이터 로드
-        df = pd.read_csv(file_path)
-
-        # 데이터 클리닝 및 서울시로 한정 (필요하다면)
-        if '시도' in df.columns:
-            df = df[df['시도'] == '서울'].copy()
+        # 1. 범죄 데이터 로드
+        df_crime = pd.read_csv(crime_file)
         
-        # 필수 컬럼 검사 및 처리
-        required_cols = ['시군구', '동', '위도', '경도', '범죄_발생건수', '인구수']
-        if not all(col in df.columns for col in required_cols):
-            st.error(f"⚠️ 데이터 파일에 다음 필수 컬럼이 모두 포함되어야 합니다: {', '.join(required_cols)}")
-            return pd.DataFrame() # 빈 데이터프레임 반환
+        # 2. 전국 동별 위경도 데이터 로드
+        df_coord = pd.read_csv(coord_file)
 
-        # 숫자형 변환 및 범죄율 계산 (만 명당)
-        df['범죄_발생건수'] = pd.to_numeric(df['범죄_발생건수'], errors='coerce')
-        df['인구수'] = pd.to_numeric(df['인구수'], errors='coerce')
+        # 3. 위경도 데이터 전처리 및 서울시 구별 평균 좌표 계산
         
-        # 인구수가 0이 아닌 경우에만 계산, 0일 경우 1로 대체하여 나눗셈 오류 방지
-        df['범죄율_만명당'] = (df['범죄_발생건수'] / df['인구수'].replace(0, 1)) * 10000 
+        # 위경도 데이터의 컬럼명이 '시군구', '위도', '경도'라고 가정
+        # (만약 컬럼명이 다르면 여기서 df_coord.rename(...)을 사용해 맞춰줘야 함)
         
-        return df
+        # 서울시 데이터로 필터링
+        if '시도' in df_coord.columns:
+            df_coord = df_coord[df_coord['시도'].str.contains('서울')].copy()
+        
+        # 구별 평균 위경도 계산 (동별 데이터를 구의 중심으로 집계)
+        df_gu_coord = df_coord.groupby('시군구').agg(
+            위도=('위도', 'mean'),
+            경도=('경도', 'mean')
+        ).reset_index()
+        
+        # 4. 범죄 데이터와 구별 평균 좌표 합치기 (Merge)
+        df_merged = pd.merge(df_crime, 
+                             df_gu_coord, 
+                             on='시군구', 
+                             how='left')
+        
+        # 5. 필수 컬럼 검사 및 숫자형 변환
+        required_cols = ['시군구', '위도', '경도', '범죄대분류', '범죄중분류', '횟수']
+        if not all(col in df_merged.columns for col in required_cols):
+            st.error(f"⚠️ 병합된 데이터에 다음 필수 컬럼이 모두 포함되어야 합니다: {', '.join(required_cols)}")
+            return pd.DataFrame() 
 
-    except FileNotFoundError:
-        st.error(f"⚠️ 데이터 파일 '{file_path}'를 찾을 수 없습니다. GitHub 경로와 파일명을 확인해 주세요.")
+        df_merged['횟수'] = pd.to_numeric(df_merged['횟수'], errors='coerce').fillna(0)
+        
+        return df_merged
+
+    except FileNotFoundError as e:
+        st.error(f"⚠️ 필요한 파일 중 하나를 찾을 수 없습니다: {e.filename}. 파일 경로와 이름을 확인해 주세요.")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"데이터 로드 및 처리 중 오류 발생: {e}")
         return pd.DataFrame()
 
-df = load_data()
+df_raw = load_data()
 
-# 데이터가 비어있으면 앱 실행 중단
-if df.empty:
+if df_raw.empty:
     st.stop()
+
+# --- (이하 코드는 이전과 동일하게 유지됩니다) ---
 
 # --- 2. Streamlit 레이아웃 설정 ---
 st.set_page_config(layout="wide")
-st.title("🚨 서울시 안전 지도 대시보드: 구/동별 범죄율 분석")
+st.title("⚖️ 서울시 범죄 통계 분석 대시보드")
 st.markdown("---")
 
 # --- 3. 사이드바 인터랙션 요소 (필터) ---
-st.sidebar.header("🔍 분석 필터")
+st.sidebar.header("🔍 분석 설정")
 
-# 시군구(구) 선택 필터
-selected_gu = st.sidebar.selectbox(
-    "자치구 선택",
-    options=['전체'] + sorted(df['시군구'].unique().tolist())
+# 모드 선택
+analysis_mode = st.sidebar.radio(
+    "분석 모드 선택",
+    ('지도 시각화 (범죄 분류 기준)', '지역 세부 통계 (자치구 기준)'),
+    index=0
 )
 
-# 데이터 필터링 (구 단위)
-if selected_gu != '전체':
-    filtered_df = df[df['시군구'] == selected_gu].copy()
-    unit_name = selected_gu # 현재 선택된 단위를 표시
-else:
-    filtered_df = df.copy()
-    unit_name = "서울시 전체"
+# --- 지도 시각화 모드 필터 ---
+if analysis_mode == '지도 시각화 (범죄 분류 기준)':
+    st.sidebar.subheader("범죄 분류 필터")
+    
+    # 대분류 선택
+    major_categories = ['전체'] + sorted(df_raw['범죄대분류'].unique().tolist())
+    selected_major = st.sidebar.selectbox("범죄 대분류 선택", options=major_categories)
 
-# 범죄율 기준 슬라이더
-min_rate = filtered_df['범죄율_만명당'].min()
-max_rate = filtered_df['범죄율_만명당'].max()
+    # 중분류 선택 (대분류에 종속)
+    minor_options = ['전체']
+    filtered_by_major = df_raw.copy()
+    if selected_major != '전체':
+        filtered_by_major = df_raw[df_raw['범죄대분류'] == selected_major]
+        minor_options += sorted(filtered_by_major['범죄중분류'].unique().tolist())
+    
+    selected_minor = st.sidebar.selectbox("범죄 중분류 선택", options=minor_options)
 
-rate_range = st.sidebar.slider(
-    '만 명당 범죄율 범위 선택',
-    min_value=min_rate,
-    max_value=max_rate,
-    value=(min_rate, max_rate)
-)
+    # 최종 필터링
+    df_filtered = filtered_by_major.copy()
+    if selected_minor != '전체':
+        df_filtered = df_filtered[df_filtered['범죄중분류'] == selected_minor]
 
-# 최종 데이터 필터링
-final_df = filtered_df[
-    (filtered_df['범죄율_만명당'] >= rate_range[0]) &
-    (filtered_df['범죄율_만명당'] <= rate_range[1])
-]
+# --- 지역 세부 통계 모드 필터 ---
+else: # analysis_mode == '지역 세부 통계 (자치구 기준)'
+    st.sidebar.subheader("지역 선택 필터")
+    gu_options = sorted(df_raw['시군구'].unique().tolist())
+    selected_gu_detail = st.sidebar.selectbox("세부 정보를 볼 자치구 선택", options=gu_options)
 
-# --- 4. 메인 콘텐츠 (지도 및 통계) ---
 
-col1, col2 = st.columns([3, 1])
+# --- 4. 메인 콘텐츠 출력 ---
 
-with col1:
-    st.subheader(f"🗺️ {unit_name} 지역별 안전 지도 (구/동)")
-
-    if not final_df.empty:
-        # Folium 지도 초기화: 필터링된 데이터의 평균 위경도를 중심으로 설정
-        center_lat = final_df['위도'].mean()
-        center_lon = final_df['경도'].mean()
+# ----------------------------------------------------
+# 📌 모드 1: 지도 시각화 (범죄 분류 기준)
+# ----------------------------------------------------
+if analysis_mode == '지도 시각화 (범죄 분류 기준)':
+    st.header(f"📍 {selected_major} - {selected_minor} 범죄 구별 발생 횟수 지도")
+    
+    # 1. 구별로 횟수 합산 및 지도 시각화에 필요한 정보만 그룹화
+    df_map = df_filtered.groupby('시군구').agg(
+        total_count=('횟수', 'sum'),
+        위도=('위도', 'first'),
+        경도=('경도', 'first')
+    ).reset_index()
+    
+    if df_map.empty or df_map['total_count'].sum() == 0:
+        st.warning("선택하신 조건에 해당하는 범죄 데이터가 없거나 횟수가 0입니다.")
+    else:
+        # 범죄 횟수 최소/최대값 계산 (색상 스케일링을 위해)
+        min_count = df_map['total_count'].min()
+        max_count = df_map['total_count'].max()
         
-        # 줌 레벨 조정: '전체' 선택 시 더 넓게, 특정 '구' 선택 시 더 상세하게
-        zoom_level = 11 if selected_gu == '전체' else 13
+        # 지도 초기화: 서울 중심 위경도 사용
+        center_lat = df_map['위도'].mean()
+        center_lon = df_map['경도'].mean()
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles="CartoDB positron")
         
-        m = folium.Map(
-            location=[center_lat, center_lon], 
-            zoom_start=zoom_level, 
-            tiles="CartoDB positron"
-        )
-        
+        # 색상 설정 함수 (Yellow -> Red 스케일)
+        def get_color(count, min_val, max_val):
+            if max_val == min_val:
+                return '#FF0000'
+            normalized = (count - min_val) / (max_val - min_val)
+            g_value = int(255 * (1 - normalized))
+            return f'#{255:02x}{g_value:02x}{0:02x}'
+
         # 지도에 마커 추가
-        global_min_rate = df['범죄율_만명당'].min()
-        global_max_rate = df['범죄율_만명당'].max()
-        
-        for idx, row in final_df.iterrows():
-            # 범죄율에 따른 색상 설정 (예: 비율이 높을수록 빨강)
-            normalized_rate = (row['범죄율_만명당'] - global_min_rate) / (global_max_rate - global_min_rate + 1e-6)
+        for idx, row in df_map.iterrows():
+            crime_count = row['total_count']
+            fill_color = get_color(crime_count, min_count, max_count)
             
-            # 색상을 Red (위험) - Blue (안전) 스케일로 지정
-            # 높은 범죄율(Normalized 1.0)은 빨강, 낮은 범죄율(Normalized 0.0)은 파랑에 가깝게 설정
-            color_hex = f'#{int(255 * normalized_rate):02x}{int(255 * (1-normalized_rate)):02x}00'
+            # 마커 크기 조정 (로그 스케일 또는 단순 선형 스케일)
+            radius_scale = 0.05 
+            radius = (crime_count * radius_scale) if crime_count > 0 else 5
             
-            # 마커 팝업 내용
+            # 팝업 내용
             popup_html = f"""
             **자치구:** {row['시군구']}<br>
-            **행정동:** {row['동']}<br>
-            **범죄율 (만 명당):** {row['범죄율_만명당']:.2f}<br>
-            **발생 건수:** {row['범죄_발생건수']}건
+            **범죄 횟수:** {int(crime_count)}건<br>
             """
-
+            
+            # 최고/최저 범죄 구 강조
+            line_weight = 2
+            border_color = fill_color
+            if crime_count == max_count:
+                line_weight = 5
+                border_color = 'black' # 최고값 강조
+            elif crime_count == min_count:
+                line_weight = 5
+                border_color = 'white' # 최저값 강조
+                
             folium.CircleMarker(
                 location=[row['위도'], row['경도']],
-                radius=row['범죄율_만명당'] * 0.8, # 범죄율에 따라 크기 조정 (단위가 동이라서 반경을 좀 줄였습니다.)
+                radius=radius + 10,
                 popup=popup_html,
-                color=f"#{int(255 * normalized_rate):02x}{int(255 * (1-normalized_rate)):02x}00",
+                color=border_color,
+                weight=line_weight,
                 fill=True,
-                fill_color=f"#{int(255 * normalized_rate):02x}{int(255 * (1-normalized_rate)):02x}00",
+                fill_color=fill_color,
                 fill_opacity=0.7
             ).add_to(m)
 
         # Streamlit에 Folium 지도 출력
-        folium_static(m, width=800, height=600)
-    else:
-        st.warning("선택하신 조건에 해당하는 데이터가 없습니다.")
-
-with col2:
-    st.subheader("📊 통계 요약")
-    if not final_df.empty:
-        st.metric(
-            label=f"{unit_name} 평균 범죄율 (만 명당)",
-            value=f"{final_df['범죄율_만명당'].mean():.2f}"
-        )
+        folium_static(m, width=1000, height=650)
         
-        # 최고 범죄율 지역 (동 단위)
-        highest_crime_loc = final_df.loc[final_df['범죄율_만명당'].idxmax()]
-        st.metric(
-            label="최고 범죄율 동",
-            value=f"{highest_crime_loc['시군구']} {highest_crime_loc['동']}",
-            delta=f"{highest_crime_loc['범죄율_만명당']:.2f} (만 명당)"
-        )
-        st.markdown("**필터링된 위험 지역**")
-        st.dataframe(
-            final_df[['시군구', '동', '범죄율_만명당', '범죄_발생건수']]
-            .sort_values(by='범죄율_만명당', ascending=False)
-            .head(10) # 상위 10개 동만 표시
-        )
-    else:
-        st.info("데이터가 필터링되지 않았습니다.")
+        st.markdown(f"**범례:** 🟥 진한 붉은색일수록 횟수가 높음 (최고 **{int(max_count)}**건), 🟨 노란색일수록 횟수가 낮음 (최저 **{int(min_count)}**건)")
+        
+# ----------------------------------------------------
+# 📌 모드 2: 지역 세부 통계 (자치구 기준)
+# ----------------------------------------------------
+else: 
+    st.header(f"📊 {selected_gu_detail} 세부 범죄 통계")
+    
+    df_gu = df_raw[df_raw['시군구'] == selected_gu_detail].copy()
+    
+    if df_gu.empty:
+        st.warning(f"{selected_gu_detail}의 세부 데이터가 없습니다.")
+        st.stop()
+        
+    # --- 4.1 대분류별 통계 Bar Chart ---
+    st.subheader("1. 범죄 대분류별 횟수")
+    df_major = df_gu.groupby('범죄대분류')['횟수'].sum().reset_index()
+    
+    # Altair Bar Chart 생성
+    chart_major = alt.Chart(df_major).mark_bar().encode(
+        x=alt.X('횟수', title='범죄 횟수'),
+        y=alt.Y('범죄대분류', sort='-x', title='범죄 대분류'),
+        tooltip=['범죄대분류', '횟수'],
+        color=alt.Color('횟수', scale=alt.Scale(range=['#ADD8E6', '#00008B']), legend=None)
+    ).properties(
+        height=300
+    ).interactive()
+    
+    st.altair_chart(chart_major, use_container_width=True)
 
-# --- 5. 결론 및 인사이트 ---
-st.markdown("---")
-st.header("💡 분석 인사이트 제안")
-st.info("""
-    특정 '자치구'를 선택하여 그 안의 '동별' 범죄율을 비교 분석해 보세요.
-    인구수 대비 범죄율이 높은 '동'을 찾아 해당 지역의 특성(예: 유동 인구, 상업 시설)을 연결하여 문제의식을 구체화할 수 있습니다.
-""")
+    # --- 4.2 중분류별 상세 통계 Table ---
+    st.subheader(f"2. 범죄 중분류별 상세 횟수")
+    df_minor = df_gu.pivot_table(
+        index='범죄대분류', 
+        columns='범죄중분류', 
+        values='횟수', 
+        aggfunc='sum'
+    ).fillna(0).astype(int)
+    
+    st.dataframe(df_minor)
 
-# 실행 방법: 터미널에서 `streamlit run [파일명].py` 명령어로 실행
+    st.markdown("---")
+    st.info(f"💡 **인사이트 도출:** {selected_gu_detail}에서 가장 높은 비율을 차지하는 **대분류** 범죄(예: 절도, 폭력)가 무엇인지 확인하고, 해당 분류에 속하는 **중분류** 범계의 세부 횟수를 통해 구체적인 위험 요소를 분석할 수 있습니다.")
