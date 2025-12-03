@@ -138,20 +138,28 @@ else:
 # ----------------------------------------------------
 # 모드 1: 지도 시각화
 # ----------------------------------------------------
+# ----------------------------------------------------
+# 모드 1: 지도 시각화
+# ----------------------------------------------------
 if analysis_mode == '지도 시각화 (범죄 분류 기준)':
     st.header(f"📍 {selected_major} - {selected_minor} 범죄 구별 발생 횟수 지도")
     
+    # 1. 구별로 횟수 합산 및 지도 시각화에 필요한 정보만 그룹화
     df_map = df_filtered.groupby('시군구').agg(
         total_count=('횟수', 'sum'),
         위도=('위도', 'first'),
         경도=('경도', 'first')
     ).reset_index()
-    
+
     if df_map.empty or df_map['total_count'].sum() == 0:
         st.warning("선택 조건에 맞는 데이터가 없거나 횟수가 0입니다.")
     else:
         min_count = df_map['total_count'].min()
         max_count = df_map['total_count'].max()
+        
+        # 🚨 [새로운 로직] 전체 합계 대비 비율 계산
+        total_sum_all_gu = df_map['total_count'].sum()
+        df_map['비율'] = (df_map['total_count'] / total_sum_all_gu) * 100
         
         center_lat = df_map['위도'].mean()
         center_lon = df_map['경도'].mean()
@@ -168,7 +176,14 @@ if analysis_mode == '지도 시각화 (범죄 분류 기준)':
             fill_color = get_color(crime_count, min_count, max_count)
             
             radius = (crime_count * 0.05) if crime_count > 0 else 5
-            popup_html = f"**자치구:** {row['시군구']}<br>**범죄 횟수:** {int(crime_count)}건<br>"
+            
+            # 🚨 [수정된 팝업] 팝업 내용에 범죄 횟수와 비율 추가
+            popup_html = f"""
+            <b>📍 {row['시군구']} 범죄 현황</b><br>
+            --------------------------<br>
+            총 횟수: <b>{int(crime_count)}건</b><br>
+            전체 대비 비율: <b>{row['비율']:.2f}%</b>
+            """
             
             line_weight = 2
             border_color = fill_color
@@ -183,7 +198,7 @@ if analysis_mode == '지도 시각화 (범죄 분류 기준)':
             folium.CircleMarker(
                 location=[row['위도'], row['경도']],
                 radius=radius + 10,
-                popup=popup_html,
+                popup=folium.Popup(popup_html, max_width=300), # max_width 설정으로 가독성 개선
                 color=border_color,
                 weight=line_weight,
                 fill=True,
@@ -193,7 +208,7 @@ if analysis_mode == '지도 시각화 (범죄 분류 기준)':
 
         folium_static(m, width=1000, height=650)
         
-        st.markdown(f"**범례:** 🟥 높은 횟수 (최고 **{int(max_count)}**건), 🟨 낮은 횟수 (최저 **{int(min_count)}**건)")
+        st.markdown(f"**범례:** 🟥 높은 횟수 (최고 **{int(max_count)}**건, **{df_map['비율'].max():.2f}%**), 🟨 낮은 횟수 (최저 **{int(min_count)}**건, **{df_map['비율'].min():.2f}%**)")
         
 # ----------------------------------------------------
 # 모드 2: 지역 세부 통계
