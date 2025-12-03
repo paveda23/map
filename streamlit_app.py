@@ -18,22 +18,30 @@ def load_data(crime_file='seoul_crime_data.csv', coord_file='전국 중심 좌�
                 continue
         raise UnicodeDecodeError(f"'{file_path}' 파일을 지원되는 인코딩으로 읽을 수 없습니다.")
 
-    # -----------------------------------------------------------
-    # try 블록 시작
     try:
         df_crime = try_read_csv(crime_file)
         df_coord = try_read_csv(coord_file)
 
-        # 🚨🚨🚨 범죄 데이터 컬럼 이름 매핑 (이 부분을 실제 파일 이름으로 수정해야 함) 🚨🚨🚨
+        # -----------------------------------------------------------
+        # 🚨🚨🚨 범죄 데이터 컬럼 이름 매핑 (이 부분만 정확히 수정해야 함) 🚨🚨🚨
+        # -----------------------------------------------------------
+        
+        # 1. 범죄 데이터 컬럼 이름 변경: '시군구'와 나머지 필수 컬럼을 매핑합니다.
         df_crime.rename(columns={
-            '실제_구_이름': '시군구',             
-            '실제_대분류_이름': '범죄대분류',   
-            '실제_중분류_이름': '범죄중분류',   
-            '실제_횟수_이름': '횟수'          
+            '<실제 구 이름 컬럼명>': '시군구',             
+            '<실제 대분류 컬럼명>': '범죄대분류',   
+            '<실제 중분류 컬럼명>': '범죄중분류',   
+            '<실제 횟수 컬럼명>': '횟수'          
         }, inplace=True)
+        
+        # 2. '서울종로구'와 같이 붙어있는 경우, '서울'을 제거하여 '종로구'만 남김 (필요시 주석 해제)
+        # if '시군구' in df_crime.columns:
+        #     df_crime['시군구'] = df_crime['시군구'].str.replace('서울', '').str.strip()
+
         # -----------------------------------------------------------
 
-        # 2. 위경도 데이터 전처리 (서울시 구별 평균 좌표 계산)
+        # 3. 위경도 데이터 전처리 (서울시 구별 평균 좌표 계산)
+        # 좌표 파일은 '시도', '시군구' 컬럼을 가지고 있다고 가정합니다.
         df_coord_seoul = df_coord[df_coord['시도'] == '서울특별시'].copy()
         
         df_gu_coord = df_coord_seoul.groupby('시군구').agg(
@@ -41,13 +49,13 @@ def load_data(crime_file='seoul_crime_data.csv', coord_file='전국 중심 좌�
             경도=('경도', 'mean')
         ).reset_index()
         
-        # 3. 데이터 병합 (Merge)
+        # 4. 데이터 병합 (Merge)
         df_merged = pd.merge(df_crime, 
                              df_gu_coord, 
                              on='시군구', 
                              how='left')
         
-        # 4. 필수 컬럼 검사 및 정리
+        # 5. 필수 컬럼 검사 및 정리
         required_cols = ['시군구', '위도', '경도', '범죄대분류', '범죄중분류', '횟수']
         if not all(col in df_merged.columns for col in required_cols):
             st.error(f"⚠️ 병합된 데이터에 다음 필수 컬럼이 모두 포함되어야 합니다: {', '.join(required_cols)}")
@@ -58,16 +66,13 @@ def load_data(crime_file='seoul_crime_data.csv', coord_file='전국 중심 좌�
             
         return df_merged
 
-    # -----------------------------------------------------------
-    # except 블록 시작
     except UnicodeDecodeError as e:
-        st.error(f"Fatal Error: CSV 파일 인코딩 오류. {e}")
+        st.error(f"Fatal Error: CSV 파일 인코딩 오류.")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"데이터 처리 중 오류 발생: {e}")
         st.error("컬럼 이름 매핑을 다시 확인하세요.")
         return pd.DataFrame()
-    # -----------------------------------------------------------
 
 # --------------------------------------------------------------------------------------
 ## 📊 Streamlit 대시보드 레이아웃 및 시각화 로직
@@ -113,107 +118,4 @@ if analysis_mode == '지도 시각화 (범죄 분류 기준)':
 else:
     st.sidebar.subheader("지역 선택 필터")
     gu_options = sorted(df_raw['시군구'].unique().tolist())
-    selected_gu_detail = st.sidebar.selectbox("세부 정보를 볼 자치구 선택", options=gu_options)
-
-# --------------------------------------------------------------------------------------
-## 📌 메인 콘텐츠 출력
-# --------------------------------------------------------------------------------------
-
-# ----------------------------------------------------
-# 모드 1: 지도 시각화
-# ----------------------------------------------------
-if analysis_mode == '지도 시각화 (범죄 분류 기준)':
-    st.header(f"📍 {selected_major} - {selected_minor} 범죄 구별 발생 횟수 지도")
-    
-    df_map = df_filtered.groupby('시군구').agg(
-        total_count=('횟수', 'sum'),
-        위도=('위도', 'first'),
-        경도=('경도', 'first')
-    ).reset_index()
-    
-    if df_map.empty or df_map['total_count'].sum() == 0:
-        st.warning("데이터가 없습니다.")
-    else:
-        min_count = df_map['total_count'].min()
-        max_count = df_map['total_count'].max()
-        
-        center_lat = df_map['위도'].mean()
-        center_lon = df_map['경도'].mean()
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles="CartoDB positron")
-        
-        def get_color(count, min_val, max_val):
-            if max_val == min_val: return '#FF0000'
-            normalized = (count - min_val) / (max_val - min_val)
-            g_value = int(255 * (1 - normalized))
-            return f'#{255:02x}{g_value:02x}{0:02x}'
-
-        for idx, row in df_map.iterrows():
-            crime_count = row['total_count']
-            fill_color = get_color(crime_count, min_count, max_count)
-            
-            radius = (crime_count * 0.05) if crime_count > 0 else 5
-            popup_html = f"**자치구:** {row['시군구']}<br>**범죄 횟수:** {int(crime_count)}건<br>"
-            
-            line_weight = 2
-            border_color = fill_color
-            
-            if crime_count == max_count and max_count > 0:
-                line_weight = 5
-                border_color = 'black'
-            elif crime_count == min_count and min_count < max_count:
-                line_weight = 5
-                border_color = 'white'
-                
-            folium.CircleMarker(
-                location=[row['위도'], row['경도']],
-                radius=radius + 10,
-                popup=popup_html,
-                color=border_color,
-                weight=line_weight,
-                fill=True,
-                fill_color=fill_color,
-                fill_opacity=0.7
-            ).add_to(m)
-
-        folium_static(m, width=1000, height=650)
-        
-        st.markdown(f"**범례:** 🟥 높은 횟수 (최고 **{int(max_count)}**건), 🟨 낮은 횟수 (최저 **{int(min_count)}**건)")
-        
-# ----------------------------------------------------
-# 모드 2: 지역 세부 통계
-# ----------------------------------------------------
-else: 
-    st.header(f"📊 {selected_gu_detail} 세부 범죄 통계")
-    
-    df_gu = df_raw[df_raw['시군구'] == selected_gu_detail].copy()
-    
-    if df_gu.empty:
-        st.warning(f"데이터가 없습니다.")
-    else:
-        # --- 4.1 대분류별 통계 Bar Chart ---
-        st.subheader("1. 범죄 대분류별 횟수")
-        df_major = df_gu.groupby('범죄대분류')['횟수'].sum().reset_index()
-        
-        chart_major = alt.Chart(df_major).mark_bar().encode(
-            x=alt.X('횟수', title='범죄 횟수'),
-            y=alt.Y('범죄대분류', sort='-x', title='범죄 대분류'),
-            tooltip=['범죄대분류', '횟수'],
-            color=alt.Color('횟수', scale=alt.Scale(range=['#ADD8E6', '#00008B']), legend=None)
-        ).properties(
-            height=300
-        ).interactive()
-        
-        st.altair_chart(chart_major, use_container_width=True)
-
-        # --- 4.2 중분류별 상세 통계 Table ---
-        st.subheader(f"2. 범죄 중분류별 상세 횟수")
-        df_minor = df_gu.pivot_table(
-            index='범죄대분류', 
-            columns='범죄중분류', 
-            values='횟수', 
-            aggfunc='sum'
-        ).fillna(0).astype(int)
-        
-        st.dataframe(df_minor)
-
-        st.markdown("---")
+    selected_gu_detail = st.sidebar.selectbox
