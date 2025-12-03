@@ -12,6 +12,7 @@ def load_data(crime_file='seoul_crime_data.csv', coord_file='전국 중심 좌�
     def try_read_csv(file_path):
         for enc in encodings:
             try:
+                # header=0: 첫 줄을 컬럼 이름으로 사용
                 df = pd.read_csv(file_path, encoding=enc, header=0) 
                 return df
             except Exception:
@@ -23,12 +24,11 @@ def load_data(crime_file='seoul_crime_data.csv', coord_file='전국 중심 좌�
         df_coord = try_read_csv(coord_file)
 
         # -----------------------------------------------------------
-        # 🚨 데이터 처리 및 정규화 (오류 방지 핵심 로직)
+        # 🚨 데이터 처리 및 정규화 (Wide Format -> Long Format)
         # -----------------------------------------------------------
         
-        # 1. Wide Format을 Long Format으로 변환 (범죄 데이터)
-        # ID 컬럼은 '범죄대분류', '범죄중분류'로 확정
-        id_cols = ['범죄대분류', '범죄중분류'] 
+        # 1. Wide Format을 Long Format으로 변환
+        id_cols = df_crime.columns[:2].tolist()
         
         df_long = pd.melt(df_crime, 
                           id_vars=id_cols,
@@ -36,38 +36,33 @@ def load_data(crime_file='seoul_crime_data.csv', coord_file='전국 중심 좌�
                           value_name='횟수')       
         
         df_crime = df_long 
-        
-        # 2. 위경도 데이터 전처리 (좌표 데이터)
-        # 좌표 파일 컬럼명 확정 및 서울 필터링
-        df_coord_seoul = df_coord[df_coord['시도'] == '서울특별시'].copy()
-        
-        # 3. 시군구 이름 정규화 (두 데이터의 구 이름 불일치 방지)
-        
-        # 3.1 범죄 데이터 '시군구' 정규화
-        # 예: '서울종로구' -> '종로구', '종로구 ' -> '종로구'
+
+        # 2. '시군구' 컬럼 정규화 (핵심): '서울' 제거 및 공백 정리
         df_crime['시군구'] = df_crime['시군구'].str.replace('서울', '').str.strip()
         
-        # 3.2 좌표 데이터 '시군구' 정규화
+        # 3. ID 컬럼명 재확정
+        df_crime.rename(columns={
+            id_cols[0]: '범죄대분류',
+            id_cols[1]: '범죄중분류',
+        }, inplace=True)
+        
+        # 4. 위경도 데이터 전처리 및 정규화
+        df_coord_seoul = df_coord[df_coord['시도'] == '서울특별시'].copy()
         df_coord_seoul['시군구'] = df_coord_seoul['시군구'].str.strip() 
 
-        # 4. 구별 평균 위경도 계산
+        # 5. 구별 평균 위경도 계산
         df_gu_coord = df_coord_seoul.groupby('시군구').agg(
             위도=('위도', 'mean'),
             경도=('경도', 'mean')
         ).reset_index()
         
-        # 5. 데이터 병합 (Merge)
+        # 6. 데이터 병합 (Merge)
         df_merged = pd.merge(df_crime, 
                              df_gu_coord, 
                              on='시군구', 
                              how='left')
         
-        # 6. 필수 컬럼 정리
-        required_cols = ['시군구', '위도', '경도', '범죄대분류', '범죄중분류', '횟수']
-        if not all(col in df_merged.columns for col in required_cols):
-             # 이 단계에서 오류가 발생하면, merge가 실패했거나 정규화가 잘못된 것입니다.
-            raise KeyError(f"최종 필수 컬럼 누락: {', '.join([c for c in required_cols if c not in df_merged.columns])}")
-
+        # 7. 필수 컬럼 정리
         df_merged['횟수'] = pd.to_numeric(df_merged['횟수'], errors='coerce').fillna(0)
         df_merged.dropna(subset=['위도', '경도'], inplace=True)
             
@@ -77,8 +72,7 @@ def load_data(crime_file='seoul_crime_data.csv', coord_file='전국 중심 좌�
         st.error(f"🔴 Fatal Error: CSV 파일 인코딩 오류.")
         return pd.DataFrame()
     except KeyError as e:
-        st.error(f"🔴 Critical Error: 데이터 구조 오류 발생! 다음 컬럼을 찾을 수 없습니다: {e}")
-        st.warning(f"🚨 [해결 방법]: 범죄 데이터에 '범죄대분류', '범죄중분류' 컬럼이 실제로 있는지, 또는 좌표 데이터에 '시도', '시군구', '위도', '경도' 컬럼이 있는지 확인하세요.")
+        st.error(f"🔴 Critical Error: 데이터 구조 오류 발생! 컬럼 '{e}'를 찾을 수 없습니다. 범죄 CSV 파일의 첫 두 컬럼이 '범죄대분류', '범죄중분류'인지 확인하세요.")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"🔴 Data Processing Error: 데이터 처리 중 일반 오류 발생: {e}")
@@ -95,7 +89,7 @@ st.title("⚖️ 서울시 범죄 통계 분석 대시보드")
 st.markdown("---")
 
 if df_raw.empty:
-    st.info("데이터 로드가 완료되지 않아 대시보드가 표시되지 않습니다. 위 오류 메시지를 확인하세요.")
+    st.error("데이터 로드에 실패했거나, 병합 후 남아있는 유효한 데이터가 없습니다. 위 오류 메시지를 확인하세요.")
     st.stop()
     
 st.sidebar.header("🔍 분석 설정")
@@ -138,13 +132,9 @@ else:
 # ----------------------------------------------------
 # 모드 1: 지도 시각화
 # ----------------------------------------------------
-# ----------------------------------------------------
-# 모드 1: 지도 시각화
-# ----------------------------------------------------
 if analysis_mode == '지도 시각화 (범죄 분류 기준)':
     st.header(f"📍 {selected_major} - {selected_minor} 범죄 구별 발생 횟수 지도")
     
-    # 1. 구별로 횟수 합산 및 지도 시각화에 필요한 정보만 그룹화
     df_map = df_filtered.groupby('시군구').agg(
         total_count=('횟수', 'sum'),
         위도=('위도', 'first'),
@@ -157,7 +147,7 @@ if analysis_mode == '지도 시각화 (범죄 분류 기준)':
         min_count = df_map['total_count'].min()
         max_count = df_map['total_count'].max()
         
-        # 🚨 [새로운 로직] 전체 합계 대비 비율 계산
+        # 전체 합계 대비 비율 계산
         total_sum_all_gu = df_map['total_count'].sum()
         df_map['비율'] = (df_map['total_count'] / total_sum_all_gu) * 100
         
@@ -171,19 +161,14 @@ if analysis_mode == '지도 시각화 (범죄 분류 기준)':
             g_value = int(255 * (1 - normalized))
             return f'#{255:02x}{g_value:02x}{0:02x}'
 
+        # Folium DivIcon을 사용하기 위해 import
+        from folium.features import DivIcon
+
         for idx, row in df_map.iterrows():
             crime_count = row['total_count']
             fill_color = get_color(crime_count, min_count, max_count)
             
             radius = (crime_count * 0.05) if crime_count > 0 else 5
-            
-            # 🚨 [수정된 팝업] 팝업 내용에 범죄 횟수와 비율 추가
-            popup_html = f"""
-            <b>📍 {row['시군구']} 범죄 현황</b><br>
-            --------------------------<br>
-            총 횟수: <b>{int(crime_count)}건</b><br>
-            전체 대비 비율: <b>{row['비율']:.2f}%</b>
-            """
             
             line_weight = 2
             border_color = fill_color
@@ -195,15 +180,37 @@ if analysis_mode == '지도 시각화 (범죄 분류 기준)':
                 line_weight = 5
                 border_color = 'white'
                 
+            # 1. Circle Marker (크기와 색상 표시용)
             folium.CircleMarker(
                 location=[row['위도'], row['경도']],
                 radius=radius + 10,
-                popup=folium.Popup(popup_html, max_width=300), # max_width 설정으로 가독성 개선
                 color=border_color,
                 weight=line_weight,
                 fill=True,
                 fill_color=fill_color,
-                fill_opacity=0.7
+                fill_opacity=0.7,
+                # 팝업 제거, 툴팁만 사용
+                tooltip=f"{row['시군구']}", 
+                popup=None
+            ).add_to(m)
+
+            # 2. 🚨 DivIcon Marker (고정 텍스트 레이블 표시용)
+            label_html = f"""
+            <div style="font-size: 10px; font-weight: bold; background-color: rgba(255, 255, 255, 0.8); 
+                        padding: 2px 4px; border: 1px solid #333; border-radius: 3px; 
+                        white-space: nowrap; text-align: center;">
+                {row['시군구']}<br>
+                {int(crime_count)}건 ({row['비율']:.1f}%)
+            </div>
+            """
+            
+            folium.Marker(
+                location=[row['위도'], row['경도']],
+                icon=DivIcon(
+                    icon_size=(150, 40), # 아이콘 영역 크기
+                    icon_anchor=(-10, 50), # 원 위치에서 오른쪽 아래로 텍스트를 이동
+                    html=label_html,
+                )
             ).add_to(m)
 
         folium_static(m, width=1000, height=650)
@@ -211,7 +218,7 @@ if analysis_mode == '지도 시각화 (범죄 분류 기준)':
         st.markdown(f"**범례:** 🟥 높은 횟수 (최고 **{int(max_count)}**건, **{df_map['비율'].max():.2f}%**), 🟨 낮은 횟수 (최저 **{int(min_count)}**건, **{df_map['비율'].min():.2f}%**)")
         
 # ----------------------------------------------------
-# 모드 2: 지역 세부 통계
+# 모드 2: 지역 세부 통계 
 # ----------------------------------------------------
 else: 
     st.header(f"📊 {selected_gu_detail} 세부 범죄 통계")
